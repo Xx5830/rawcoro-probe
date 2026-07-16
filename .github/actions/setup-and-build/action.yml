@@ -1,0 +1,23 @@
+name: 'Setup system and build cmake'
+
+inputs:
+    preset:
+        description: 'preset = debug or release'
+        required: true
+
+runs:
+    using: "composite"
+    steps:
+    - name: "Install Ninja and just"
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y ninja-build just
+
+    - name: "Configure Cmake ${{inputs.preset}}"
+      shell: bash
+      run: just setup ${{inputs.preset}}
+      
+    - name: "Build Cmake ${{inputs.preset}}"
+      shell: bash
+      run: just build ${{inputs.preset}}
+    
+        

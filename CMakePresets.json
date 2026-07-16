@@ -27,7 +27,8 @@
             "description": "release build with optimization",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE" : "Release",
-                "BUILD_TESTING" : "FALSE"
+                "BUILD_TESTING" : "FALSE",
+                "CMAKE_CXX_FLAGS_RELEASE" : "-O3 -Werror -pedantic -Wall -Wextra -DNDEBUG"
             }
         }
     ],

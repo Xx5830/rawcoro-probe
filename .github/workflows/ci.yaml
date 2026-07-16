@@ -1,0 +1,38 @@
+name: 'Start Tests And Build'
+
+on:
+    pull_request:
+        branches:
+            - 'main'
+            - 'dev-*'
+            - 'dev'
+
+jobs:
+    build:
+        runs-on: ubuntu-24.04 
+        timeout-minutes: 20
+        steps:
+            - name: "Clone repository"
+              uses: actions/checkout@v4
+
+            - name: "Setup and build"
+              uses: ./.github/actions/setup-and-build
+              with:
+                preset: 'debug'
+
+            - name: "Tests active"
+              run: "just test"
+            
+        
+    release:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 15
+        needs: build
+        steps:
+            - name: "Clone repository"
+              uses: actions/checkout@v4
+
+            - name: "Setup and build"
+              uses: ./.github/actions/setup-and-build
+              with:
+                preset: 'release'

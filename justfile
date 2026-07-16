@@ -14,7 +14,7 @@ setup preset="release":
     cmake --preset {{preset}}
 
 #Сборка проекта
-build preset="release": (setup {{preset}})
+build preset="release": (setup preset)
     cmake --build --preset {{preset}}
 
 #Запуск тестов

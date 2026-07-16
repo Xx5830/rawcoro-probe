@@ -1,5 +1,5 @@
 CompileFlags:
-  CompilationDatabase: build
+  CompilationDatabase: build/build
   Add:
     - -std=c++23
     - -Iinternal

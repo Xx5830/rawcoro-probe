@@ -1,4 +1,5 @@
 name: 'Setup system and build cmake'
+description: 'Installs ninja. Configures and build cmake with a given preset'
 
 inputs:
     preset:

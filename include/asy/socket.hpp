@@ -10,25 +10,29 @@
 #include <string_view>
 
 namespace net {
-struct Socket {
+struct UniqueFd {
    private:
-    int fd_;
+    int fd_ = -1;
 
    public:
-    Socket(int domain, int type, int protocol) {
-        fd_ = ::socket(domain, type, protocol);
-    }
-    Socket(int fd) {
+    UniqueFd(int fd) {
         fd_ = fd;
     }
+    UniqueFd() {
+        fd_ = -1;
+    }
 
-    Socket(const Socket& other) = delete;
-    Socket(Socket&& other) {
+    static UniqueFd socket(int domain, int type, int protocol) {
+        return ::socket(domain, type, protocol);
+    }
+
+    UniqueFd(const UniqueFd& other) = delete;
+    UniqueFd(UniqueFd&& other) {
         *this = std::move(other);
     }
 
-    Socket& operator=(const Socket& other) = delete;
-    Socket& operator=(Socket&& other) {
+    UniqueFd& operator=(const UniqueFd& other) = delete;
+    UniqueFd& operator=(UniqueFd&& other) {
         fd_ = other.fd();
         other.fd_ = -1;
         return *this;
@@ -42,6 +46,12 @@ struct Socket {
         return fd_;
     }
 
+    int release() {
+        int fd = fd_;
+        fd_ = -1;
+        return fd;
+    }
+
     explicit operator bool() const {
         return isValid();
     }
@@ -50,15 +60,15 @@ struct Socket {
         return fd_;
     }
 
-    ~Socket() {
+    ~UniqueFd() {
         if (fd_ != -1) {
             ::close(fd_);
         }
     }
 };
 
-inline Socket tcpListen(std::string_view ip, uint16_t port) {
-    Socket sock(AF_INET, SOCK_STREAM, 0);
+inline UniqueFd tcpListen(std::string_view ip, uint16_t port) {
+    UniqueFd sock = UniqueFd::socket(AF_INET, SOCK_STREAM, 0);
 
     if (!sock) {
         return -1;
@@ -96,8 +106,8 @@ inline Socket tcpListen(std::string_view ip, uint16_t port) {
     return sock;
 }
 
-inline Socket tcpConnect(std::string_view ip, uint16_t port) {
-    Socket sock(AF_INET, SOCK_STREAM, 0);
+inline UniqueFd tcpConnect(std::string_view ip, uint16_t port) {
+    UniqueFd sock = UniqueFd::socket(AF_INET, SOCK_STREAM, 0);
 
     if (!sock) {
         return -1;

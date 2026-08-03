@@ -8,21 +8,26 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cassert>
 #include <cerrno>
 #include <csignal>
 #include <expected>
 #include <functional>
+#include <map>
+#include <memory>
 #include <optional>
 #include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include "coroutine.hpp"
+#include "scheduler.hpp"
 #include "signal-mask.hpp"
 #include "socket.hpp"
 
 namespace asy {
-struct Epoll {
+struct Epoll : Scheduler {
    private:
     struct StartupContext {
         sigset_t mask;
@@ -37,11 +42,17 @@ struct Epoll {
     std::unordered_map<int, std::function<void()>> signals_;
     std::unordered_set<int> register_fds_;
 
+    std::unordered_map<int, std::unique_ptr<Coroutine>> coroutines_;
+    std::unordered_map<int, std::function<void(ssize_t)>> ticks_;
+    std::unordered_map<int, uint64_t> coro_key_;
+    std::unordered_map<int, uint64_t> pending_erase_;
+
     std::function<void(int, sockaddr, socklen_t)> on_accept_;
     std::unordered_map<int, std::function<void(int)>> on_read_handlers_;
     std::unordered_map<int, std::function<void(int)>> on_write_handlers_;
 
     bool stop_ = false;
+    bool running_ = false;
 
     bool updateEpoll(int fd) {
         bool haves = register_fds_.contains(fd);
@@ -55,6 +66,17 @@ struct Epoll {
             flags |= EPOLLOUT;
         }
         flags |= EPOLLET;
+
+        if (!(flags & (EPOLLIN | EPOLLOUT))) {
+            if (haves) {
+                if (epoll_ctl(epoll_sock_.fd(), EPOLL_CTL_DEL, fd, nullptr) == -1) {
+                    return false;
+                }
+                register_fds_.erase(fd);
+            }
+
+            return true;
+        }
 
         epoll_event ev{};
         ev.events = flags;
@@ -94,32 +116,42 @@ struct Epoll {
     }
 
     std::optional<StartupContext> initial() {
-        if (!server_sock_) {
-            return std::nullopt;
-        }
-
         epoll_sock_ = std::move(net::UniqueFd(epoll_create1(EPOLL_CLOEXEC)));
 
         if (!epoll_sock_) {
             return std::nullopt;
         }
 
-        if (!onRead(server_sock_, [&](int server_fd) {
-                sockaddr addr{};
-                socklen_t len = sizeof(addr);
-                for (int fd = ::accept(server_fd, &addr, &len); fd != -1; fd = ::accept(server_fd, &addr, &len)) {
-                    if (int flags = fcntl(fd, F_GETFL); flags >= 0) {
-                        if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        if (server_sock_) {
+            if (!onRead(server_sock_, [&](int server_fd) {
+                    sockaddr addr{};
+                    socklen_t len = sizeof(addr);
+                    while (true) {
+                        int fd = ::accept(server_fd, &addr, &len);
+
+                        if (fd == -1) {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                break;
+                            }
+                            if (errno == ECONNABORTED) {
+                                continue;
+                            }
+                            break;
+                        }
+
+                        if (int flags = fcntl(fd, F_GETFL); flags >= 0) {
+                            if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+                                close(fd);
+                            }
+                        } else {
                             close(fd);
                         }
-                    } else {
-                        close(fd);
-                    }
 
-                    std::invoke(on_accept_, fd, addr, len);
-                }
-            })) {
-            return std::nullopt;
+                        std::invoke(on_accept_, fd, addr, len);
+                    }
+                })) {
+                return std::nullopt;
+            }
         }
 
         sigset_t mask;
@@ -168,6 +200,11 @@ struct Epoll {
     }
 
     void run() {
+        if (running_) {
+            throw std::logic_error("Epoll::run() called twice");
+        }
+        running_ = true;
+
         auto context = initial();
         if (!context) {
             return;
@@ -196,6 +233,14 @@ struct Epoll {
                     }
                 }
             }
+
+            for (auto fd : pending_erase_) {
+                if (coro_key_[fd.first] == fd.second) {
+                    ticks_.erase(fd.first);
+                    coroutines_.erase(fd.first);
+                }
+            }
+            pending_erase_.clear();
         }
     }
 
@@ -211,7 +256,7 @@ struct Epoll {
         on_accept_ = std::move(handler);
     }
 
-    std::expected<void, int> onRead(int fd, std::function<void(int)> handler) {
+    std::expected<void, int> onRead(int fd, std::function<void(int)> handler) override {
         on_read_handlers_[fd] = std::move(handler);
 
         if (!updateEpoll(fd)) {
@@ -223,7 +268,7 @@ struct Epoll {
         return {};
     }
 
-    std::expected<void, int> onWrite(int fd, std::function<void(int)> handler) {
+    std::expected<void, int> onWrite(int fd, std::function<void(int)> handler) override {
         on_write_handlers_[fd] = std::move(handler);
 
         if (!updateEpoll(fd)) {
@@ -247,6 +292,36 @@ struct Epoll {
         updateEpoll(fd);
     }
 
+    void cancel(int fd) override {
+        on_write_handlers_.erase(fd);
+        on_read_handlers_.erase(fd);
+        bool ok = updateEpoll(fd);
+        assert(ok && "EPOLL_CTL_DEL failed - fd was never registered");
+    }
+
+    void spawn(int fd, std::unique_ptr<Coroutine> coro) {
+        auto* ptr = coro.get();
+        coroutines_[fd] = std::move(coro);
+        uint64_t key = ++coro_key_[fd];
+
+        ticks_[fd] = [this, fd, key, ptr](ssize_t last_result) {
+            if (coro_key_[fd] != key) {
+                return;
+            }
+            auto awt = ptr->resume(last_result);
+
+            if (!awt) {
+                cancel(fd);
+                pending_erase_[fd] = key;
+                return;
+            }
+
+            awt->subscribe(*this, ticks_[fd]);
+        };
+
+        std::invoke(ticks_[fd], 0);
+    }
+
     // ==========================================
     // Reaction
     // ==========================================
@@ -260,7 +335,7 @@ struct Epoll {
         events_.resize(event_buff_size);
     }
 
-    size_t serverFd() {
+    int serverFd() {
         return server_sock_;
     }
 
